@@ -27,6 +27,84 @@ pub const NUM_LOWER_SUBTRIES: usize = 16usize.pow(UPPER_TRIE_MAX_DEPTH as u32);
 
 /// A revealed sparse trie with subtries that can be updated in parallel.
 ///
+/// This structure implements a two-level trie design that enables parallel processing
+/// of trie updates by splitting the trie into an upper subtrie and 256 lower subtries.
+///
+/// # Structure Overview
+///
+/// The trie is split across:
+/// - **1 upper subtrie**: Contains nodes with paths of length < [`UPPER_TRIE_MAX_DEPTH`] (2
+///   nibbles)
+/// - **256 lower subtries**: Each handles paths starting with a specific 2-nibble prefix
+///
+/// ## Upper Subtrie
+///
+/// The upper subtrie can contain at most 17 nodes:
+/// - 1 root node (empty path `0x`)
+/// - Up to 16 child nodes (paths `0x0` through `0xf`)
+///
+/// The roots of the lower subtries are contained within the lower subtries themselves,
+/// and are NOT contained in the upper subtrie. This means the upper subtrie remains
+/// small and manageable.
+///
+/// ## Lower Subtries
+///
+/// There are exactly 256 lower subtries (indexed 0-255), each handling paths that
+/// start with a specific 2-nibble prefix. The index is calculated from the first
+/// 2 nibbles of the path.
+///
+/// # Path Distribution
+///
+/// ```
+/// Upper Subtrie (max 17 nodes):
+/// ├── 0x        (root)
+/// ├── 0x0       (child)
+/// ├── 0x1       (child)
+/// ├── ...
+/// └── 0xf       (child)
+///
+/// Lower Subtries (256 total):
+/// ├── Subtrie 0:   paths starting with 0x00
+/// ├── Subtrie 1:   paths starting with 0x01
+/// ├── Subtrie 18:  paths starting with 0x12
+/// ├── Subtrie 171: paths starting with 0xab
+/// ├── ...
+/// └── Subtrie 255: paths starting with 0xff
+/// ```
+///
+/// # Examples
+///
+/// ```
+/// // Upper subtrie nodes (paths < 2 nibbles)
+/// 0x        -> root node
+/// 0x1       -> child node
+/// 0xa       -> child node
+///
+/// // Lower subtrie nodes (paths ≥ 2 nibbles)
+/// 0x12      -> lower subtrie 18 (0x12 = 18 decimal)
+/// 0x123     -> lower subtrie 18
+/// 0x1234    -> lower subtrie 18
+/// 0xab      -> lower subtrie 171 (0xab = 171 decimal)
+/// 0xabcd    -> lower subtrie 171
+/// ```
+///
+/// # Performance Benefits
+///
+/// This structure provides several advantages:
+///
+/// 1. **Parallel Processing**: Lower subtries can be updated independently and in parallel
+/// 2. **Reduced Contention**: Upper subtrie has limited size (max 17 nodes), reducing lock
+///    contention
+/// 3. **Efficient Updates**: Only changed subtries need to be processed during hash updates
+/// 4. **Scalability**: The structure scales well with large numbers of leaf nodes
+///
+/// # Implementation Details
+///
+/// - The [`SparseSubtrieType`] enum determines which subtrie a path belongs to
+/// - The `path_subtrie_index_unchecked` function calculates the lower subtrie index
+/// - Each subtrie maintains its own node collection and update tracking
+/// - The `prefix_set` tracks which parts of the trie have been modified
+///
 /// ## Invariants
 ///
 /// - Each leaf entry in the `subtries` and `upper_trie` collection must have a corresponding entry
@@ -35,8 +113,25 @@ pub const NUM_LOWER_SUBTRIES: usize = 16usize.pow(UPPER_TRIE_MAX_DEPTH as u32);
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ParallelSparseTrie {
     /// This contains the trie nodes for the upper part of the trie.
+    ///
+    /// Contains at most 17 nodes:
+    /// - 1 root node (empty path)
+    /// - Up to 16 child nodes (paths 0x0 through 0xf)
+    ///
+    /// The roots of lower subtries are NOT stored here - they are contained
+    /// within their respective lower subtries.
     upper_subtrie: Box<SparseSubtrie>,
     /// An array containing the subtries at the second level of the trie.
+    ///
+    /// There are exactly 256 lower subtries (indexed 0-255), each handling
+    /// paths that start with a specific 2-nibble prefix. The index is calculated
+    /// from the first 2 nibbles of the path.
+    ///
+    /// Examples:
+    /// - Index 0: paths starting with 0x00
+    /// - Index 18: paths starting with 0x12
+    /// - Index 171: paths starting with 0xab
+    /// - Index 255: paths starting with 0xff
     lower_subtries: [Option<Box<SparseSubtrie>>; NUM_LOWER_SUBTRIES],
     /// Set of prefixes (key paths) that have been marked as updated.
     /// This is used to track which parts of the trie need to be recalculated.
